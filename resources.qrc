@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/plugins/Pseudo_Cleaner" >
+        <file>icon.png</file>
+    </qresource>
+</RCC>
