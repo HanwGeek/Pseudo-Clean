@@ -205,9 +205,10 @@ class PseudoCleaner:
 
         # Loading layers for selection & init params
         self.canvas = self.iface.mapCanvas()
-        self.corrList = set()
-        self.errList = []
-        self.endVerticeMap = defaultdict(list)
+        self.corrSet = set()
+        self.errSet = set()
+        self.errFeatMap = defaultdict(list)
+        self.errPointList = []
         self.dlg.mLayerComboBox.clear()
 
         layers = list(QgsProject.instance().mapLayers().values())
@@ -232,10 +233,10 @@ class PseudoCleaner:
           lineFeatIter = self.lineLayer.getFeatures()
 
           # Find pseudo points
-          list(map(self._map_points, lineFeatIter))
+          list(map(self._map_points_to_feat, lineFeatIter))
 
           # Init pseudo point data layer
-          self._add_err_layer()
+          self._render_err_layer()
           # Add pseudo point data item to tableview 
           self._render_table()
 
@@ -250,7 +251,7 @@ class PseudoCleaner:
 
           self.model.clear()
 
-    def _map_points(self, feat):
+    def _map_points_to_feat(self, feat):
       g = feat.geometry()
       
       # Map features as point to id
@@ -258,51 +259,13 @@ class PseudoCleaner:
         lines = g.asMultiPolyline()
         for line in lines:
           startPoint, endPoint = line[0], line[-1]
-          self.endVerticeMap[startPoint].append(feat.id())
-          self.endVerticeMap[endPoint].append(feat.id())
+          self.errFeatMap[startPoint].append(feat.id())
+          self.errFeatMap[endPoint].append(feat.id())
       else:
         line = g.asPolyline()
         startPoint, endPoint = line[0], line[-1]
-        self.endVerticeMap[startPoint].append(feat.id())
-        self.endVerticeMap[endPoint].append(feat.id())
-
-    def _add_err_layer(self):
-      # init err layer and start editing  
-      self.errLayer = QgsVectorLayer("Point?crs=" + self.lineLayer.crs().authid(), 
-                                     self.lineLayer.name() + "_Pseudo_Point", "memory")
-      errPr = self.errLayer.dataProvider()
-      self.errLayer.startEditing()
-      for (point, feat_ids) in self.endVerticeMap.items():
-        if (len(feat_ids) == 2):
-
-          # Pseudo point
-          self.errList += list(map(lambda x: (point, x), feat_ids))
-
-          # Add pseudo point to errLayer
-          feat = QgsFeature()
-          feat.setGeometry(QgsGeometry.fromPointXY(point))
-          errPr.addFeatures([feat])
-
-        else:
-          for feat_id in feat_ids:
-            self.corrList.add(feat_id)
-
-      self.errLayer.commitChanges()
-
-    def _zoom_to_feature(self, item):
-      # Clear previous selection
-      for layer in self.canvas.layers():
-        if layer.type() == layer.VectorLayer:
-          layer.removeSelection()
-      self.canvas.refresh()
-
-      # Get id of feature selected
-      feat_id = self.model.item(item.row(), 2).data(0)
-      self.lineLayer.select(int(feat_id))
-
-      # Zoom canvas
-      self.canvas.setExtent(layer.boundingBoxOfSelected())
-      self.canvas.refresh()
+        self.errFeatMap[startPoint].append(feat.id())
+        self.errFeatMap[endPoint].append(feat.id())
 
     def _pseudo_clean(self):
       # Union find feature set
@@ -327,7 +290,7 @@ class PseudoCleaner:
           _father[_y] = _x
           _rank[x] += 1
 
-      for (_, feat_ids) in self.endVerticeMap.items():
+      for (_, feat_ids) in self.errFeatMap.items():
         for feat_id in feat_ids[1:]:
           _union(feat_id, feat_ids[0])
 
@@ -340,28 +303,57 @@ class PseudoCleaner:
                                        self.lineLayer.name() + "_correct", "memory")
       corrPr = self.corrLayer.dataProvider()
       self.corrLayer.startEditing()
-      print(len(feat_set))
-      # for (_, feat_ids) in feat_set.items():
-      #   new_feat = QgsFeature()
-      #   geom = new_feat.geometry()
-      #   # Combine features
-      #   # new_feat.setGeometry(QgsGeometry.fromPolyLineXY(point))
-      #   for idx, feat_id in enumerate(feat_ids):
-      #     feat = next(self.lineLayer.getFeatures(QgsFeatureRequest().setFilterFid(feat_id)))
-      #     if idx == 0:
-      #       new_feat.setGeometry(feat.geometry())
-      #     else:
-      #       for line in feat.geometry().asGeometryCollection():
-      #         new_feat.geometry().addPartGeometry(line):
-      #   corrPr.addFeatures([new_feat])
-      corr_feats = list(map(lambda x: next(self.lineLayer.getFeatures(QgsFeatureRequest().setFilterFid(x))), self.corrList))
-      # corrPr.addFeatures(corr_feats)
-      # self.corrLayer.commitChanges()
+
+      # Generate new features
+      new_feats = map(self._render_corr_layer, feat_set.values())
+      corrPr.addFeatures(new_feats)
+      self.corrLayer.commitChanges()
       # # Show the correct layer
-      # QgsProject.instance().addMapLayer(self.corrLayer)
-        
+      QgsProject.instance().addMapLayer(self.corrLayer)
+
+    def _render_err_layer(self):
+      # init err layer and start editing  
+      self.errLayer = QgsVectorLayer("Point?crs=" + self.lineLayer.crs().authid(), 
+                                     self.lineLayer.name() + "_Pseudo_Point", "memory")
+      errPr = self.errLayer.dataProvider()
+      self.errLayer.startEditing()
+      for (point, feat_ids) in self.errFeatMap.items():
+        if len(feat_ids) == 2:
+          # Pseudo point
+          self.errSet.add(feat_ids[0])
+          self.errSet.add(feat_ids[1])
+          self.errPointList.extend(map(lambda x: (point, x), feat_ids))
+
+          # Add pseudo point to errLayer
+          feat = QgsFeature()
+          feat.setGeometry(QgsGeometry.fromPointXY(point))
+          errPr.addFeatures([feat])
+
+      for (point, feat_ids) in self.errFeatMap.items():
+        if len(feat_ids) != 2:
+          for feat_id in feat_ids:
+            if feat_id not in self.errSet:
+              self.corrSet.add(feat_id)
+
+      self.errLayer.commitChanges()
+
+    def _render_corr_layer(self, feat_ids):
+      new_feat = QgsFeature()
+      geom = new_feat.geometry()
+
+      # Combine features
+      for idx, feat_id in enumerate(feat_ids):
+        feat = next(self.lineLayer.getFeatures(QgsFeatureRequest().setFilterFid(feat_id)))
+        if idx == 0:
+          new_feat.setGeometry(feat.geometry())
+          geom = new_feat.geometry()
+        else:
+          geom = geom.combine(feat.geometry())
+      new_feat.setGeometry(geom)
+      return new_feat
+    
     def _render_table(self):
-      for (idx, err) in list(enumerate(self.errList)):
+      for (idx, err) in list(enumerate(self.errPointList)):
         self.model.setItem(idx, 0, QStandardItem(str(err[0].x())))
         self.model.setItem(idx, 1, QStandardItem(str(err[0].y())))
         self.model.setItem(idx, 2, QStandardItem(str(err[1])))
@@ -372,6 +364,21 @@ class PseudoCleaner:
       self.resDlg.mResTableView.setColumnWidth(1, w / 3 - 1)
       self.resDlg.mResTableView.setColumnWidth(2, w - 2 * w / 3 - 2)
     
+    def _zoom_to_feature(self, item):
+      # Clear previous selection
+      for layer in self.canvas.layers():
+        if layer.type() == layer.VectorLayer:
+          layer.removeSelection()
+      self.canvas.refresh()
+
+      # Get id of feature selected
+      feat_id = self.model.item(item.row(), 2).data(0)
+      self.lineLayer.select(int(feat_id))
+
+      # Zoom canvas
+      self.canvas.setExtent(layer.boundingBoxOfSelected())
+      self.canvas.refresh()
+
 # class WorkThread(QThread):
 #   trigger = pyqtSignal(int)
 #   def __init__(self, iface, parent=None):
@@ -385,7 +392,7 @@ class PseudoCleaner:
 #     lineLayer = self.iface.activeLayer()
 #     featCount = lineLayer.featureCount()
 #     lineFeatIter = lineLayer.getFeatures()
-#     endVerticeMap = defaultdict(list)
+#     errFeatMap = defaultdict(list)
 #     # # map(_map_points, lineFeatIter)
 #     print(list(lineFeatIter))
       
@@ -396,10 +403,10 @@ class PseudoCleaner:
 #       lines = g.asMultiPolyline()
 #       for line in lines:
 #         startPoint, endPoint = line[0], line[-1]
-#         endVerticeMap[startPoint] = feat.id()
-#         endVerticeMap[endPoint] = feat.id()
+#         errFeatMap[startPoint] = feat.id()
+#         errFeatMap[endPoint] = feat.id()
 #     else:
 #       line = g.asPolyline()
 #       startPoint, endPoint = line[0], line[-1]
-#       endVerticeMap[startPoint] = feat.id()
-#       endVerticeMap[endPoint] = feat.id()
+#       errFeatMap[startPoint] = feat.id()
+#       errFeatMap[endPoint] = feat.id()
