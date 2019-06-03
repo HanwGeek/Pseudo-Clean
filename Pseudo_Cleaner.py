@@ -24,7 +24,7 @@
 from PyQt5.QtCore import QSettings, QTranslator, qVersion, QCoreApplication
 from PyQt5.QtCore import QThread, QTime, QModelIndex, pyqtSignal
 from PyQt5.QtGui import QIcon, QStandardItemModel, QStandardItem
-from PyQt5.QtWidgets import QAction, QAbstractItemView
+from PyQt5.QtWidgets import QAction, QAbstractItemView, QProgressBar, QProgressDialog
 from qgis.core import QgsVectorLayer, QgsProject, QgsFeature, QgsGeometry, QgsFeatureRequest, QgsWkbTypes
 # Initialize Qt resources from file resources.py
 from .resources import *
@@ -215,11 +215,6 @@ class PseudoCleaner:
         for layer in layers:
           if layer.type() == layer.VectorLayer:
             self.dlg.mLayerComboBox.addItem(layer.name())
-
-        # Start the work thread
-        # self.workthread = WorkThread(iface=self.iface)
-        # self.workthread.trigger.connect(self.dlg.pBar.setValue)
-        # self.workthread.start()
         
         # show the dialog
         self.dlg.show()
@@ -229,6 +224,7 @@ class PseudoCleaner:
         
         # if OK to process the layer selected
         if result:
+          print(len(self.errFeatMap))
           self.lineLayer = layers[self.dlg.mLayerComboBox.currentIndex()]
           lineFeatIter = self.lineLayer.getFeatures()
 
@@ -247,7 +243,13 @@ class PseudoCleaner:
 
           res = self.resDlg.exec_() 
           if res:
-            self._pseudo_clean()
+            # TODO: Init a thread to work
+            self.pBar = WaitProgressDialog()
+            self.pBar.show()
+            self.thread = WorkThread(self)
+            self.thread.start()
+            
+            # self._pseudo_clean()
 
           self.model.clear()
 
@@ -308,8 +310,10 @@ class PseudoCleaner:
       new_feats = map(self._render_corr_layer, feat_set.values())
       corrPr.addFeatures(new_feats)
       self.corrLayer.commitChanges()
+      
       # # Show the correct layer
-      QgsProject.instance().addMapLayer(self.corrLayer)
+      # print(QgsProject.instance().addMapLayer(self.corrLayer))
+      # print(self.corrLayer.featureCount())
 
     def _render_err_layer(self):
       # init err layer and start editing  
@@ -335,7 +339,7 @@ class PseudoCleaner:
             if feat_id not in self.errSet:
               self.corrSet.add(feat_id)
 
-      self.errLayer.commitChanges()
+      self.errLayer.commitChanges()      
 
     def _render_corr_layer(self, feat_ids):
       new_feat = QgsFeature()
@@ -379,34 +383,33 @@ class PseudoCleaner:
       self.canvas.setExtent(layer.boundingBoxOfSelected())
       self.canvas.refresh()
 
-# class WorkThread(QThread):
-#   trigger = pyqtSignal(int)
-#   def __init__(self, iface, parent=None):
-#     super(WorkThread, self).__init__(parent)
-#     self.iface = iface
+    def _add_layer(self):
+      print(QgsProject.instance().addMapLayer(self.corrLayer))
 
-#   def __del__(self):
-#     self.wait()
 
-#   def run(self):
-#     lineLayer = self.iface.activeLayer()
-#     featCount = lineLayer.featureCount()
-#     lineFeatIter = lineLayer.getFeatures()
-#     errFeatMap = defaultdict(list)
-#     # # map(_map_points, lineFeatIter)
-#     print(list(lineFeatIter))
-      
-#   def _map_points(feat):
-#     g = feat.geometry()
+class WorkThread(QThread):
+  trigger = pyqtSignal()
+  addLayerTrigger = pyqtSignal()
+  def __init__(self, cleaner, parent=None):
+    super(WorkThread, self).__init__(parent)
+    self.cleaner = cleaner
+    self.trigger.connect(self.cleaner.pBar.close)
+    self.addLayerTrigger.connect(self.cleaner._add_layer)
+
+  def __del__(self):
+    self.wait()
+
+  def run(self):
+    self.cleaner._pseudo_clean()
+    self.trigger.emit()
+    self.addLayerTrigger.emit()
+    # print(self.cleaner.corrLayer.featureCount())
     
-#     if g.isMultipart():
-#       lines = g.asMultiPolyline()
-#       for line in lines:
-#         startPoint, endPoint = line[0], line[-1]
-#         errFeatMap[startPoint] = feat.id()
-#         errFeatMap[endPoint] = feat.id()
-#     else:
-#       line = g.asPolyline()
-#       startPoint, endPoint = line[0], line[-1]
-#       errFeatMap[startPoint] = feat.id()
-#       errFeatMap[endPoint] = feat.id()
+    
+class WaitProgressDialog(QProgressDialog):
+  def __init__(self, parent=None):
+    super(WaitProgressDialog, self).__init__(parent)
+    self.setMaximum(0)
+    self.setMinimum(0)
+    self.setWindowTitle("Wating... ")
+    self.setFixedSize(400, 150)
